@@ -7,10 +7,12 @@ import tempfile
 import torch
 import dnnlib
 
-from training import training_loop
+from training import training_loop, builder
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
+
+from pytorch_lightning import seed_everything
 
 #----------------------------------------------------------------------------
 
@@ -42,8 +44,8 @@ def setup_training_loop_kwargs(
     metrics    = None, # List of metric names: [], ['fid50k_full'] (default), ...
     seed       = None, # Random seed: <int>, default = 0
     # Dataset.
-    data       = None, # Training dataset (required): <path>
-    test_data  = None, # Testing dataset for metrics, if not use training dataset
+    # data       = None, # Training dataset (required): <path>
+    # test_data  = None, # Testing dataset for metrics, if not use training dataset
     cond       = None, # Train conditional model based on dataset labels: <bool>, default = False
     subset     = None, # Train with only N images: <int>, default = all
     mirror     = None, # Augment dataset with x-flips: <bool>, default = False
@@ -70,7 +72,16 @@ def setup_training_loop_kwargs(
     allow_tf32 = None, # Allow PyTorch to use TF32 for matmul and convolutions: <bool>, default = False
     nobench    = None, # Disable cuDNN benchmarking: <bool>, default = False
     workers    = None, # Override number of DataLoader workers: <int>, default = 3
+    test_split = None,
+    cfg_path = None,
+    sample_frac = None,
+    remove_modality_gap = None,
+    remove_mean = None,
+    normalize_prefix = None,
+    add_gaussian_noise = None
 ):
+    
+    
     args = dnnlib.EasyDict()
 
     # ------------------------------------------
@@ -165,21 +176,37 @@ def setup_training_loop_kwargs(
         seed = 0
     assert isinstance(seed, int)
     args.random_seed = seed
+    
+    # Seed everything
+    seed_everything(args.random_seed)
 
     # -----------------------------------
     # Dataset: data, cond, subset, mirror
     # -----------------------------------
+    
+    args.test_split = test_split
+    args.cfg_path = cfg_path
+    args.sample_frac = sample_frac
+    args.remove_modality_gap = remove_modality_gap
+    args.remove_mean = remove_mean 
+    args.normalize_prefix = normalize_prefix
+    args.add_gaussian_noise = add_gaussian_noise
 
-    assert data is not None
-    assert isinstance(data, str)
-    print('using data: ', data, 'testing data: ', test_data)
-    if test_data is None:
-        test_data = data
-    args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False, use_clip=True, ratio=args.ratio)
-    args.testing_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=test_data, use_labels=True, max_size=None, xflip=False, use_clip=True, ratio=1.0)
+    # assert data is not None
+    # assert isinstance(data, str)
+    # print('using data: ', data, 'testing data: ', test_data)
+    # if test_data is None:
+    #     test_data = data
+    args.training_set_kwargs = dnnlib.EasyDict()
+    args.testing_set_kwargs = dnnlib.EasyDict()
+    # args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False, use_clip=True, ratio=args.ratio)
+    # args.testing_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=test_data, use_labels=True, max_size=None, xflip=False, use_clip=True, ratio=1.0)
+    
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=False, num_workers=1, prefetch_factor=2)
     try:
-        training_set = dnnlib.util.construct_class_by_name(**args.training_set_kwargs) # subclass of training.dataset.Dataset
+        data_cfg = builder.load_cfg(args)
+        training_set = builder.build_dataset(data_cfg, split=data_cfg.data.train_split)   
+        # training_set = dnnlib.util.construct_class_by_name(**args.training_set_kwargs) # subclass of training.dataset.Dataset
         args.training_set_kwargs.resolution = training_set.resolution # be explicit about resolution
         args.training_set_kwargs.use_labels = training_set.has_labels # be explicit about labels
         args.training_set_kwargs.max_size = len(training_set) # be explicit about dataset size
@@ -437,7 +464,7 @@ def setup_training_loop_kwargs(
 
 #----------------------------------------------------------------------------
 
-def subprocess_fn(rank, args, temp_dir):
+def subprocess_fn(rank, args, cfg, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(args.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
@@ -455,9 +482,9 @@ def subprocess_fn(rank, args, temp_dir):
     training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
     if rank != 0:
         custom_ops.verbosity = 'none'
-
+        
     # Execute training loop.
-    training_loop.training_loop(rank=rank, **args)
+    training_loop.training_loop(rank=rank, cfg=cfg, **args)
 
 #----------------------------------------------------------------------------
 
@@ -502,8 +529,8 @@ class CommaSeparatedList(click.ParamType):
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
 
 # Dataset.
-@click.option('--data', help='Training data (directory or zip)', metavar='PATH', required=True)
-@click.option('--test_data', help='Testing data (directory or zip)', metavar='PATH', required=True)
+# @click.option('--data', help='Training data (directory or zip)', metavar='PATH', required=True)
+# @click.option('--test_data', help='Testing data (directory or zip)', metavar='PATH', required=True)
 
 @click.option('--cond', help='Train conditional model based on dataset labels [default: false]', type=bool, metavar='BOOL')
 @click.option('--subset', help='Train with only N images [default: all]', type=int, metavar='INT')
@@ -531,6 +558,16 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--nobench', help='Disable cuDNN benchmarking', type=bool, metavar='BOOL')
 @click.option('--allow-tf32', help='Allow PyTorch to use TF32 internally', type=bool, metavar='BOOL')
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
+
+# Extra for data processing and logging
+@click.option('--test_split', help='Test split [default: test]', default='test',  type=click.Choice(['test', 'train+restval', 'val']))
+@click.option('--cfg_path', help='Config file for modalities and data', type=str)
+@click.option('--sample_frac',  help="fraction of training set to sample", type=float, default=None)
+@click.option('--remove_modality_gap', help="whether or not to directly remove the modality gap", is_flag=True)
+@click.option('--remove_mean', help="whether or not to mean from the input embed", is_flag=True)
+@click.option('--normalize_prefix', help="whether to normalize clip embeds or not", is_flag=True)
+@click.option('--add_gaussian_noise', help="whether to add gaussian noise to input embeds", is_flag=True)
+
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper
@@ -577,7 +614,7 @@ def main(ctx, outdir, dry_run, **config_kwargs):
       <PATH or URL>  Custom network pickle.
     """
     dnnlib.util.Logger(should_flush=True)
-
+    
     # Setup training options.
     try:
         run_desc, args = setup_training_loop_kwargs(**config_kwargs)
@@ -600,13 +637,13 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print(json.dumps(args, indent=2))
     print()
     print(f'Output directory:   {args.run_dir}')
-    print(f'Training data:      {args.training_set_kwargs.path}')
+    # print(f'Training data:      {args.training_set_kwargs.path}')
     print(f'Training duration:  {args.total_kimg} kimg')
     print(f'Number of GPUs:     {args.num_gpus}')
-    print(f'Number of images:   {args.training_set_kwargs.max_size}')
-    print(f'Image resolution:   {args.training_set_kwargs.resolution}')
-    print(f'Conditional model:  {args.training_set_kwargs.use_labels}')
-    print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
+    # print(f'Number of images:   {args.training_set_kwargs.max_size}')
+    # print(f'Image resolution:   {args.training_set_kwargs.resolution}')
+    # print(f'Conditional model:  {args.training_set_kwargs.use_labels}')
+    # print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
     print(f'Discriminator use normalization:  {args.d_use_norm}')
     print(f'Discriminator use fts: {args.d_use_fts}')
 
@@ -616,19 +653,43 @@ def main(ctx, outdir, dry_run, **config_kwargs):
         return
 
     # Create output directory.
+    # print('Creating output directory...')
+    # os.makedirs(args.run_dir)
+    # with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
+    #     json.dump(args, f, indent=2)
+
+    # Init wandb
+    print('Init wandb...')
+    cfg = builder.load_cfg(args)
+    builder.build_wandb_logger(cfg, args)
+    
     print('Creating output directory...')
-    os.makedirs(args.run_dir)
+    args.run_dir = os.path.join(args.run_dir, cfg.experiment_name)
+    os.makedirs(args.run_dir, exist_ok=True)
+    
     with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
         json.dump(args, f, indent=2)
-
+        
+    # Remove data args from args
+    args.pop('test_split')
+    args.pop('cfg_path')
+    args.pop('sample_frac')
+    args.pop('remove_modality_gap')
+    args.pop('remove_mean')
+    args.pop('normalize_prefix')
+    args.pop('add_gaussian_noise')
+        
     # Launch processes.
     print('Launching processes...')
-    torch.multiprocessing.set_start_method('spawn')
     with tempfile.TemporaryDirectory() as temp_dir:
-        if args.num_gpus == 1:
-            subprocess_fn(rank=0, args=args, temp_dir=temp_dir)
-        else:
-            torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, temp_dir), nprocs=args.num_gpus)
+        subprocess_fn(rank=0, cfg=cfg, args=args, temp_dir=temp_dir)
+    
+    # torch.multiprocessing.set_start_method('spawn')
+    # with tempfile.TemporaryDirectory() as temp_dir:
+    #     if args.num_gpus == 1:
+    #         subprocess_fn(rank=0, cfg=cfg, args=args, temp_dir=temp_dir)
+    #     else:
+    #         torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, cfg, temp_dir), nprocs=args.num_gpus)
 
 #----------------------------------------------------------------------------
 

@@ -20,9 +20,6 @@ import torchvision.transforms as T
 import legacy
 from metrics import metric_main
 
-import wandb
-from .builder import build_dataset, load_cfg, build_wandb_logger
-
 #----------------------------------------------------------------------------
 
 def setup_snapshot_image_grid(training_set, random_seed=0):
@@ -132,14 +129,14 @@ def training_loop(
     iic                     = 0.,
     metric_only_test        = False,
     finetune                = False,
-    ratio = 1.,
-    cfg=None
+    ratio = 1.
+
 ):
     # Initialize.
     start_time = time.time()
     device = torch.device('cuda', rank)
-    # np.random.seed(random_seed * num_gpus + rank)
-    # torch.manual_seed(random_seed * num_gpus + rank)
+    np.random.seed(random_seed * num_gpus + rank)
+    torch.manual_seed(random_seed * num_gpus + rank)
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
@@ -149,10 +146,7 @@ def training_loop(
     # Load training set.
     if rank == 0:
         print('Loading training set...')
-    
-    training_set = build_dataset(cfg, split=cfg.data.train_split)   
-    val_set = build_dataset(cfg, split="val")     
-    # training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
+    training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
     if rank == 0:
@@ -494,13 +488,9 @@ def training_loop(
 #                 if rank == 0:
 #                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
 #                 stats_metrics.update(result_dict.results)
-
             for metric in metrics:
-            #     result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'], D=snapshot_data['D'],
-            #         dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test)
                 result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'], D=snapshot_data['D'],
-                    dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test, dataset=val_set)
-            
+                    dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test)
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
                 stats_metrics.update(result_dict.results)
@@ -522,25 +512,14 @@ def training_loop(
             fields = dict(stats_dict, timestamp=timestamp)
             stats_jsonl.write(json.dumps(fields) + '\n')
             stats_jsonl.flush()
-#         if stats_tfevents is not None:
-#             global_step = int(cur_nimg / 1e3)
-#             walltime = timestamp - start_time
-#             for name, value in stats_dict.items():
-#                 stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-#                 wandb.log({name:value.mean}, step=global_step)
-                
-#             for name, value in stats_metrics.items():
-#                 stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-#                 wandb.log({f'Metrics/{name}':value}, step=global_step)
-            # stats_tfevents.flush()
+        if stats_tfevents is not None:
             global_step = int(cur_nimg / 1e3)
-            
-            # wandb logging
-            stats_dict = {name:value.mean for name, value in stats_dict.items()}
-            wandb.log(stats_dict, step=global_step)
-            
-            stats_metrics = {f'Metrics/{name}':value for name, value in stats_metrics.items()}
-            wandb.log(stats_metrics, step=global_step)
+            walltime = timestamp - start_time
+            for name, value in stats_dict.items():
+                stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
+            for name, value in stats_metrics.items():
+                stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
+            stats_tfevents.flush()
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 
@@ -556,9 +535,5 @@ def training_loop(
     if rank == 0:
         print()
         print('Exiting...')
-        print("="*80)
-        print(f"Latest checkpoint: {snapshot_pkl}")
-        print("="*80)
-        wandb.finish()
 
 #----------------------------------------------------------------------------

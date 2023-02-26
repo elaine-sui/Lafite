@@ -1,10 +1,4 @@
 # Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
 import time
@@ -25,6 +19,9 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import legacy
 from metrics import metric_main
+
+import wandb
+from .builder import build_dataset, load_cfg, build_wandb_logger
 
 #----------------------------------------------------------------------------
 
@@ -135,13 +132,14 @@ def training_loop(
     iic                     = 0.,
     metric_only_test        = False,
     finetune                = False,
-
+    ratio = 1.,
+    cfg=None
 ):
     # Initialize.
     start_time = time.time()
     device = torch.device('cuda', rank)
-    np.random.seed(random_seed * num_gpus + rank)
-    torch.manual_seed(random_seed * num_gpus + rank)
+    # np.random.seed(random_seed * num_gpus + rank)
+    # torch.manual_seed(random_seed * num_gpus + rank)
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
@@ -151,7 +149,10 @@ def training_loop(
     # Load training set.
     if rank == 0:
         print('Loading training set...')
-    training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
+    
+    training_set = build_dataset(cfg, split=cfg.data.train_split)   
+    val_set = build_dataset(cfg, split="val")     
+    # training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
     if rank == 0:
@@ -175,13 +176,14 @@ def training_loop(
         with dnnlib.util.open_url(resume_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
+            print(name, module)
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
         c = torch.empty([batch_gpu, G.c_dim], device=device)
-        fts = torch.empty([batch_gpu, 512], device=device)
+        fts = torch.empty([batch_gpu, f_dim], device=device)
         img = misc.print_module_summary(G, [z, c])
         misc.print_module_summary(D, [img, c, fts])
 
@@ -213,39 +215,19 @@ def training_loop(
         print('Setting up training phases...')
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
-    if finetune:
-        for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval)]:#, ('D', D, D_opt_kwargs, D_reg_interval)]:
-            if reg_interval is None:
-                print(module.finetune_para())
-                if name == 'G':
-                    opt = dnnlib.util.construct_class_by_name(params=module.finetune_para(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                else:
-                    opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
-            else: # Lazy regularization.
-                mb_ratio = reg_interval / (reg_interval + 1)
-                opt_kwargs = dnnlib.EasyDict(opt_kwargs)
-                opt_kwargs.lr = opt_kwargs.lr * mb_ratio
-                opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-                if name == 'G':
-                    opt = dnnlib.util.construct_class_by_name(params=module.finetune_para(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                else:
-                    opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
-#                 phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
-    else:
-        for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
-            if reg_interval is None:
-                opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
-            else: # Lazy regularization.
-                mb_ratio = reg_interval / (reg_interval + 1)
-                opt_kwargs = dnnlib.EasyDict(opt_kwargs)
-                opt_kwargs.lr = opt_kwargs.lr * mb_ratio
-                opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-                opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
-                phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
-                phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
+    
+    for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
+        if reg_interval is None:
+            opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
+        else: # Lazy regularization.
+            mb_ratio = reg_interval / (reg_interval + 1)
+            opt_kwargs = dnnlib.EasyDict(opt_kwargs)
+            opt_kwargs.lr = opt_kwargs.lr * mb_ratio
+            opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
+            opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
+            phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
     for phase in phases:
         phase.start_event = None
         phase.end_event = None
@@ -277,14 +259,16 @@ def training_loop(
 #                'a women, high heel shoes made of brown leather',
 #                'a slipper for men']
 
-#         text = ['A living area with a television and a table',
-#                'A child eating a birthday cake near some balloons',
-#                'A small kitchen with low a ceiling',
-#                'A group of skiers are preparing to ski down a mountain']
+        text = ['A living area with a television and a table',
+               'A child eating a birthday cake near some balloons',
+               'A small kitchen with low a ceiling',
+               'A group of skiers are preparing to ski down a mountain',
+               'A school bus in the forest',
+               'A green train is coming down the tracks']
     
-        text = ['A man wearing glasses with beard, he has brown hair',
-               'A woman with long blonde hair and earrings, she is smiling',
-               'A man has blue hair and no beard']
+#         text = ['A man wearing glasses with beard, he has brown hair',
+#                'A woman with long blonde hair and earrings, she is smiling',
+#                'A man has blue hair and no beard']
     
     
         with torch.no_grad():
@@ -364,19 +348,13 @@ def training_loop(
             if phase.start_event is not None:
                 phase.start_event.record(torch.cuda.current_stream(device))
             phase.opt.zero_grad(set_to_none=True)
-#             if finetune:
-#                 if 'G' in phase.name:
-#                     phase.module.finetune_train()  # in finetune stage, we only change part of the network parameters
-#                 else:
-#                     phase.module.requires_grad_(True)
-#             else:
             phase.module.requires_grad_(True)
 
             # Accumulate gradients over multiple rounds.
             for round_idx, (real_img, real_c, gen_z, gen_c, real_img_feature, real_txt_feature) in enumerate(zip(phase_real_img, phase_real_c, phase_gen_z, phase_gen_c, phase_img_features, phase_txt_features)):
                 sync = (round_idx == batch_size // (batch_gpu * num_gpus) - 1)
                 gain = phase.interval
-                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c=gen_c, sync=sync, gain=gain, img_fts=real_img_feature, txt_fts=real_txt_feature, mixing_prob=mixing_prob, temp=temp, lam=lam, gather=gather, d_use_fts=d_use_fts, itd=itd, itc=itc, iid=iid, iic=iic, finetune=finetune)
+                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c=gen_c, sync=sync, gain=gain, img_fts=real_img_feature, txt_fts=real_txt_feature, mixing_prob=mixing_prob, temp=temp, lam=lam, gather=gather, d_use_fts=d_use_fts, itd=itd, itc=itc, iid=iid, iic=iic)
 
             # Update weights.
             phase.module.requires_grad_(False)
@@ -466,16 +444,34 @@ def training_loop(
                     img_list.append(img_)
                 images = torch.cat([img.cpu() for img in img_list]).numpy()            
                 save_image_grid(images, os.path.join(run_dir, f'fakes_{cur_nimg//1000:06d}style_txt_step_{step}.png'), drange=[-1,1], grid_size=grid_size)   
-            
-#             for step_num in range(5):
-#                 images = torch.cat([G_ema(z=z, c=c, fts=f, step=step_num+1, noise_mode='const').cpu() for f, z, c in zip(f_txt_, grid_z, grid_c)]).numpy()            
-#                 save_image_grid(images, os.path.join(run_dir, f'fakes_{cur_nimg//1000:06d}txt_step_{step_num+1}.png'), drange=[-1,1], grid_size=grid_size)   
-            
+
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
             snapshot_data = dict(training_set_kwargs=dict(training_set_kwargs))
+
+            snapshot_data['args'] = dict(  # newly added, not available in our pre-trained models
+                num_gpus=num_gpus,
+                batch_size=batch_size,
+                batch_gpu=batch_gpu,
+                G_reg_interval=G_reg_interval,
+                D_reg_interval=D_reg_interval,
+                allow_tf32=allow_tf32,
+                f_dim=f_dim,
+                d_use_norm=d_use_norm,
+                d_use_fts=d_use_fts,
+                mixing_prob=mixing_prob,
+                lam=lam,
+                temp=temp,
+                gather=gather,
+                itd=itd,
+                itc=itc,
+                iid=iid,
+                iic=iic,
+                loss_kwargs = loss_kwargs,
+            )
+
             for name, module in [('G', G), ('D', D), ('G_ema', G_ema), ('augment_pipe', augment_pipe)]:
                 if module is not None:
                     if num_gpus > 1:
@@ -498,9 +494,13 @@ def training_loop(
 #                 if rank == 0:
 #                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
 #                 stats_metrics.update(result_dict.results)
+
             for metric in metrics:
+            #     result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'], D=snapshot_data['D'],
+            #         dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test)
                 result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'], D=snapshot_data['D'],
-                    dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test)
+                    dataset_kwargs=training_set_kwargs, testset_kwargs=testing_set_kwargs, num_gpus=num_gpus, rank=rank, device=device, txt_recon=True, img_recon=False, metric_only_test=metric_only_test, dataset=val_set)
+            
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
                 stats_metrics.update(result_dict.results)
@@ -522,14 +522,25 @@ def training_loop(
             fields = dict(stats_dict, timestamp=timestamp)
             stats_jsonl.write(json.dumps(fields) + '\n')
             stats_jsonl.flush()
-        if stats_tfevents is not None:
+#         if stats_tfevents is not None:
+#             global_step = int(cur_nimg / 1e3)
+#             walltime = timestamp - start_time
+#             for name, value in stats_dict.items():
+#                 stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
+#                 wandb.log({name:value.mean}, step=global_step)
+                
+#             for name, value in stats_metrics.items():
+#                 stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
+#                 wandb.log({f'Metrics/{name}':value}, step=global_step)
+            # stats_tfevents.flush()
             global_step = int(cur_nimg / 1e3)
-            walltime = timestamp - start_time
-            for name, value in stats_dict.items():
-                stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-            for name, value in stats_metrics.items():
-                stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-            stats_tfevents.flush()
+            
+            # wandb logging
+            stats_dict = {name:value.mean for name, value in stats_dict.items()}
+            wandb.log(stats_dict, step=global_step)
+            
+            stats_metrics = {f'Metrics/{name}':value for name, value in stats_metrics.items()}
+            wandb.log(stats_metrics, step=global_step)
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 
@@ -545,5 +556,9 @@ def training_loop(
     if rank == 0:
         print()
         print('Exiting...')
+        print("="*80)
+        print(f"Latest checkpoint: {snapshot_pkl}")
+        print("="*80)
+        wandb.finish()
 
 #----------------------------------------------------------------------------

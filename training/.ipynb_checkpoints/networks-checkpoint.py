@@ -1,10 +1,3 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import numpy as np
 import torch
@@ -329,23 +322,12 @@ class ManiNetwork(torch.nn.Module):
         for idx in range(self.num_layers-4):
             layer = getattr(self, f'fc{idx}')
             x = layer(x)
-        
-#         # f([w, fts])
 
-#         x = torch.cat([x, w[:, 0, :]], dim=-1)
-
-#         bias = torch.cat([x, w[:, 0, :]], dim=-1)
-#         scale = torch.cat([x, w[:, 0, :]], dim=-1)
         if self.structure == 1:
             for idx in range(4):
                 layer_w_fts = getattr(self, f'w_fts_{idx}')
                 x = layer_w_fts(x)
-            
-# #         for idx in range(4):
-# #             s_layer_w_fts = getattr(self, f's_w_fts_{idx}')
-# #             scale = s_layer_w_fts(scale)
-            
-          # f(w)*fts + g(w)
+
         elif self.structure == 2:
             bias = x#w[:, 0, :]
             scale = x#w[:, 0, :]
@@ -357,7 +339,6 @@ class ManiNetwork(torch.nn.Module):
                 layer_scale = getattr(self, f'scale{idx}')
                 scale = layer_scale(scale)
 
-    # #         x = x*scale + bias
             x = w[:, 0, :]*scale + bias
     
         # Update moving average of W.
@@ -378,30 +359,7 @@ class ManiNetwork(torch.nn.Module):
                     x = self.w_avg.lerp(x, truncation_psi)
                 else:
                     x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
-                    
-    
-#         # #f(fts)*w + g(fts)
-#         bias = x
-#         scale = x
-#         for idx in range(4):
-#             layer_bias = getattr(self, f'bias{idx}')
-#             bias = layer_bias(bias)
-        
-#         for idx in range(4):
-#             layer_scale = getattr(self, f'scale{idx}')
-#             scale = layer_scale(scale)
-        
-#         # Broadcast.
-#         if self.num_ws is not None:
-#             with torch.autograd.profiler.record_function('broadcast'):
-#                 scale = scale.unsqueeze(1).repeat([1, self.num_ws, 1])
-#                 bias = bias.unsqueeze(1).repeat([1, self.num_ws, 1])
-#         x = w*scale + bias
-        
-#         if self.num_ws is not None:
-#             with torch.autograd.profiler.record_function('broadcast'):
-#                 x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
-#         x = x + w    
+
         return x
 
 
@@ -422,6 +380,7 @@ class SynthesisLayer(torch.nn.Module):
         conv_clamp      = None,         # Clamp the output of convolution layers to +-X, None = disable clamping.
         channels_last   = False,  # Use channels_last format for the weights?
         structure = 0, 
+        f_dim = 512
     ):
         super().__init__()
         self.resolution = resolution
@@ -433,37 +392,32 @@ class SynthesisLayer(torch.nn.Module):
         self.padding = kernel_size // 2
         self.act_gain = bias_act.activation_funcs[activation].def_gain
         self.structure = structure
-        
+        _f_dim = (f_dim+512)//2
+
         if self.structure == 0:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1) # initial affine style layer
             
-            self.pre_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-            self.pre_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
+            self.pre_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01) # pre process text features  
+            self.pre_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)   
             
             self.affine_0 = FullyConnectedLayer(512, in_channels, bias_init=1)# f([w, txt])
             
         elif self.structure == 1:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)#wed
-            self.scale_layer_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
-            self.scale_layer_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
+            self.scale_layer_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01)#wed
+            self.scale_layer_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)#wed
             self.scale_layer_2 = FullyConnectedLayer(512, in_channels, )#, lr_multiplier=0.01)#wed
-#             self.scale_layer_2 = FullyConnectedLayer(512, w_dim, bias_init=1, lr_multiplier=0.01)#wed
 
-            self.bias_layer_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
-            self.bias_layer_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
+            self.bias_layer_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01)#wed
+            self.bias_layer_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)#wed
             self.bias_layer_2 = FullyConnectedLayer(512, in_channels,)#, lr_multiplier=0.01)#wed
-#             self.bias_layer_2 = FullyConnectedLayer(512, w_dim, lr_multiplier=0.01)#wed
-    
+
         elif self.structure == 2:
-            self.pre_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-            self.pre_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
+            self.pre_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01) # pre process text features  
+            self.pre_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)   
             self.affine_0 = FullyConnectedLayer(w_dim+512, in_channels, bias_init=1)# f([w, txt])
             
-            
-#             self.affine_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-#             self.affine_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
-#             self.affine = FullyConnectedLayer(w_dim+512, in_channels, bias_init=1)# f([w, txt])
-            
+
         elif self.structure == 3:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)
         else:
@@ -475,38 +429,6 @@ class SynthesisLayer(torch.nn.Module):
             self.register_buffer('noise_const', torch.randn([resolution, resolution]))
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
-    
-    def finetune_para(self):
-        para_list = []
-        if self.structure == 1:
-            para_list += [i for i in self.scale_layer_0.parameters()]
-            para_list += [i for i in self.scale_layer_1.parameters()]
-            para_list += [i for i in self.scale_layer_2.parameters()]
-            para_list += [i for i in self.bias_layer_0.parameters()]
-            para_list += [i for i in self.bias_layer_1.parameters()]
-            para_list += [i for i in self.bias_layer_2.parameters()]
-            para_list += [i for i in self.affine.parameters()]
-        elif self.structure == 2:
-            para_list += [i for i in self.pre_0.parameters()]
-            para_list += [i for i in self.pre_1.parameters()]
-            para_list += [i for i in self.affine_0.parameters()]
-        return para_list
-            
-            
-    def finetune_train(self):
-        if self.structure == 1:
-            self.scale_layer_0.requires_grad_(True)
-            self.scale_layer_1.requires_grad_(True)
-            self.scale_layer_2.requires_grad_(True)
-            self.bias_layer_0.requires_grad_(True)
-            self.bias_layer_1.requires_grad_(True)
-            self.bias_layer_2.requires_grad_(True)
-            self.affine.requires_grad_(True)
-        elif self.structure == 2:
-            self.pre_0.requires_grad_(True)
-            self.pre_1.requires_grad_(True)
-            self.affine_0.requires_grad_(True)
-            
         
     def forward(self, x, w, fts, styles=None, noise_mode='random', fused_modconv=True, gain=1):
         assert noise_mode in ['random', 'const', 'none']
@@ -527,17 +449,13 @@ class SynthesisLayer(torch.nn.Module):
                 biases = self.bias_layer_0(fts)
                 biases = self.bias_layer_1(biases)
                 biases = self.bias_layer_2(biases)
-#                 w = w*scales + biases
                 styles = self.affine(w)
                 styles = biases + styles*scales
             elif self.structure == 2:
                 fts = self.pre_0(fts)
                 fts = self.pre_1(fts)
                 styles = self.affine_0(torch.cat([fts, w], dim=-1))
-                
-#                 fts = self.affine_0(fts)
-#                 fts = self.affine_1(fts)
-#                 styles = self.affine(torch.cat([fts, w], dim=-1))
+
             elif self.structure == 3:
                 styles = self.affine(w)
             else:
@@ -566,40 +484,34 @@ class SynthesisLayer(torch.nn.Module):
 
 @persistence.persistent_class
 class ToRGBLayer(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, w_dim, kernel_size=1, conv_clamp=None, channels_last=False, structure=0):
+    def __init__(self, in_channels, out_channels, w_dim, kernel_size=1, conv_clamp=None, channels_last=False, structure=0, f_dim=512):
         super().__init__()
         self.conv_clamp = conv_clamp
         self.structure = structure
-        
+        _f_dim = (f_dim+512)//2
         if self.structure == 0:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1) # initial affine style layer
             
-            self.pre_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-            self.pre_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
+            self.pre_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01) # pre process text features  
+            self.pre_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)   
             
             self.affine_0 = FullyConnectedLayer(512, in_channels, bias_init=1) # f([w, txt])
             
         elif self.structure == 1:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)#wed
-            self.scale_layer_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
-            self.scale_layer_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
+            self.scale_layer_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01)#wed
+            self.scale_layer_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)#wed
             self.scale_layer_2 = FullyConnectedLayer(512, in_channels, )#, lr_multiplier=0.01)#wed
-#             self.scale_layer_2 = FullyConnectedLayer(512, w_dim, bias_init=1, lr_multiplier=0.01)#wed
 
-            self.bias_layer_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
-            self.bias_layer_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)#wed
+            self.bias_layer_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01)#wed
+            self.bias_layer_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)#wed
             self.bias_layer_2 = FullyConnectedLayer(512, in_channels,)#, lr_multiplier=0.01)#wed
-#             self.bias_layer_2 = FullyConnectedLayer(512, w_dim, lr_multiplier=0.01)#wed
-    
+
         elif self.structure == 2:
-            self.pre_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-            self.pre_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
+            self.pre_0 = FullyConnectedLayer(f_dim, _f_dim, activation='lrelu', lr_multiplier=0.01) # pre process text features  
+            self.pre_1 = FullyConnectedLayer(_f_dim, 512, activation='lrelu', lr_multiplier=0.01)   
             self.affine_0 = FullyConnectedLayer(w_dim+512, in_channels, bias_init=1)# f([w, txt])
-            
-            
-#             self.affine_0 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01) # pre process text features  
-#             self.affine_1 = FullyConnectedLayer(512, 512, activation='lrelu', lr_multiplier=0.01)   
-#             self.affine = FullyConnectedLayer(w_dim+512, in_channels, bias_init=1)# f([w, txt])
+
         elif self.structure == 3:
             self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)#wed
         else:
@@ -609,37 +521,7 @@ class ToRGBLayer(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
         self.weight_gain = 1 / np.sqrt(in_channels * (kernel_size ** 2))
-        
-    def finetune_para(self):
-        para_list = []
-        if self.structure == 1:
-            para_list += [i for i in self.scale_layer_0.parameters()]
-            para_list += [i for i in self.scale_layer_1.parameters()]
-            para_list += [i for i in self.scale_layer_2.parameters()]
-            para_list += [i for i in self.bias_layer_0.parameters()]
-            para_list += [i for i in self.bias_layer_1.parameters()]
-            para_list += [i for i in self.bias_layer_2.parameters()]
-            para_list += [i for i in self.affine.parameters()]
-        elif self.structure == 2:
-            para_list += [i for i in self.pre_0.parameters()]
-            para_list += [i for i in self.pre_1.parameters()]
-            para_list += [i for i in self.affine_0.parameters()]
-        return para_list
-    
-    def finetune_train(self):
-        if self.structure == 1:
-            self.scale_layer_0.requires_grad_(True)
-            self.scale_layer_1.requires_grad_(True)
-            self.scale_layer_2.requires_grad_(True)
-            self.bias_layer_0.requires_grad_(True)
-            self.bias_layer_1.requires_grad_(True)
-            self.bias_layer_2.requires_grad_(True)
-            self.affine.requires_grad_(True)
-        elif self.structure == 2:
-            self.pre_0.requires_grad_(True)
-            self.pre_1.requires_grad_(True)
-            self.affine_0.requires_grad_(True)
-            
+
             
     def forward(self, x, w, fts, styles=None, fused_modconv=True):
         if styles is None:
@@ -657,24 +539,19 @@ class ToRGBLayer(torch.nn.Module):
                 biases = self.bias_layer_0(fts)
                 biases = self.bias_layer_1(biases)
                 biases = self.bias_layer_2(biases)
-#                 w = w*scales + biases
                 styles = self.affine(w)
                 styles = biases + styles*scales
             elif self.structure == 2:
                 fts = self.pre_0(fts)
                 fts = self.pre_1(fts)
                 styles = self.affine_0(torch.cat([fts, w], dim=-1))
-                
-#                 fts = self.affine_0(fts)
-#                 fts = self.affine_1(fts)
-#                 styles = self.affine(torch.cat([fts, w], dim=-1))
+
             elif self.structure == 3:
                 styles = self.affine(w)
             else:
                 raise('structure undefined')                
             styles = styles * self.weight_gain
 
-#         styles = self.affine(torch.cat([w, fts], dim=-1)) * self.weight_gain #wed
         x = modulated_conv2d(x=x, weight=self.weight, styles=styles, demodulate=False, fused_modconv=fused_modconv)
         x = bias_act.bias_act(x, self.bias.to(x.dtype), clamp=self.conv_clamp)
         
@@ -700,6 +577,7 @@ class SynthesisBlock(torch.nn.Module):
         use_fp16            = False,        # Use FP16 for this block?
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
         structure = 0,
+        f_dim = 512,
         **layer_kwargs,                     # Arguments for SynthesisLayer.
     ):
         assert architecture in ['orig', 'skip', 'resnet']
@@ -718,47 +596,26 @@ class SynthesisBlock(torch.nn.Module):
 
         if in_channels == 0:
             self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
-#             # use text feature to adjust the const ?
-#             self.const_scale_1 = FullyConnectedLayer(512, 512, activation='lrelu')#, lr_multiplier=0.01)
-#             self.const_scale_2 = FullyConnectedLayer(512, out_channels, activation='linear')#, lr_multiplier=0.01)#wed
-#             self.const_bias_1 = FullyConnectedLayer(512, 512, activation='lrelu')#, lr_multiplier=0.01)
-#             self.const_bias_2 = FullyConnectedLayer(512, out_channels, activation='linear')#, lr_multiplier=0.01)#wed
-            
+
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
-                resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, **layer_kwargs)
+                resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, f_dim=f_dim, **layer_kwargs)
             self.num_conv += 1
 
         self.conv1 = SynthesisLayer(out_channels, out_channels, w_dim=w_dim, resolution=resolution,
-            conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, **layer_kwargs)
+            conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, f_dim=f_dim, **layer_kwargs)
         self.num_conv += 1
 
         if is_last or architecture == 'skip':
             self.torgb = ToRGBLayer(out_channels, img_channels, w_dim=w_dim,
-                conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, )
+                conv_clamp=conv_clamp, channels_last=self.channels_last, structure=structure, f_dim=f_dim)
             self.num_torgb += 1
 
         if in_channels != 0 and architecture == 'resnet':
             self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, bias=False, up=2,
                 resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def finetune_train(self):
-        self.conv1.finetune_train()
-        if self.in_channels != 0:
-            self.conv0.finetune_train()
-        if self.is_last or self.architecture == 'skip':
-            self.torgb.finetune_train()
- 
-    def finetune_para(self):
-        para_list = []
-        para_list += self.conv1.finetune_para()
-        if self.in_channels != 0:
-            para_list += self.conv0.finetune_para()
-        if self.is_last or self.architecture == 'skip':
-            para_list += self.torgb.finetune_para()
-        return para_list
-    
-    
+            
     def forward(self, x, img, ws, fts, styles=None, return_styles=False, force_fp32=False, fused_modconv=None, **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_conv + self.num_torgb, self.w_dim])
         w_iter = iter(ws.unbind(dim=1))
@@ -777,13 +634,7 @@ class SynthesisBlock(torch.nn.Module):
         if self.in_channels == 0:
             x = self.const.to(dtype=dtype, memory_format=memory_format)
             x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
-#             # adjust the const input with text feature ? 
-#             const_scale = self.const_scale_1(fts)
-#             const_scale = self.const_scale_2(const_scale)
-#             const_bias = self.const_bias_1(fts)
-#             const_bias = self.const_bias_2(fts)
-#             x = x*const_scale.view(ws.shape[0], -1, 1, 1) + const_bias.view(ws.shape[0], -1, 1, 1)
-            
+
         else:
             misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
             x = x.to(dtype=dtype, memory_format=memory_format)
@@ -845,7 +696,7 @@ class SynthesisNetwork(torch.nn.Module):
         channel_base    = 32768,    # Overall multiplier for the number of channels.
         channel_max     = 512,      # Maximum number of channels in any layer.
         num_fp16_res    = 0,        # Use FP16 for the N highest resolutions.
-        change          = 256,
+        change        = 256,
         **block_kwargs,             # Arguments for SynthesisBlock.
     ):
         assert img_resolution >= 4 and img_resolution & (img_resolution - 1) == 0
@@ -866,13 +717,10 @@ class SynthesisNetwork(torch.nn.Module):
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
             
-            if change > 0:
-                if res <= change:
-                    structure = 2
-                else:
-                    structure = 1
+            if res <= change:
+                structure = 2
             else:
-                structure = 3
+                structure = 1
                 
             block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
                 img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, structure=structure, **block_kwargs)
@@ -880,19 +728,8 @@ class SynthesisNetwork(torch.nn.Module):
             if is_last:
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
+
             
-            
-    def finetune_para(self):
-        para_list = []
-        for res in self.block_resolutions:
-            block = getattr(self, f'b{res}')
-            para_list += block.finetune_para()
-        return para_list
-            
-    def finetune_train(self):
-        for res in self.block_resolutions:
-            block = getattr(self, f'b{res}')
-            block.finetune_train()
             
             
     def forward(self, ws, fts, styles=None, return_styles=False, return_styles_res=False, **block_kwargs):
@@ -955,10 +792,8 @@ class Generator(torch.nn.Module):
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
-#         if m_num_layers > 0:
-#             self.mani = ManiNetwork(z_dim = m_layer_features, c_dim=c_dim, num_ws=self.num_ws, num_layers = m_num_layers, layer_features = m_layer_features, w_dim=w_dim)
-#         else:
-#             self.mani = None
+        self.m_layer_features = m_layer_features
+
         self.mani = None
         self.synthesis_kwargs = synthesis_kwargs
         self.mapping_kwargs = mapping_kwargs
@@ -968,12 +803,9 @@ class Generator(torch.nn.Module):
             ws = w
         else:
             ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-#         if self.mani is not None:
         if fts is None:
-            fts = torch.randn(z.size()[0], 512).to(z.device)
+            fts = torch.randn(z.size()[0], self.m_layer_features).to(z.device)
             fts = fts/fts.norm(dim=-1, keepdim=True)
-#             ws = self.mani(z=fts, c=c, w=ws) # wed
-#         img = self.synthesis(ws, **synthesis_kwargs) # wed
         if return_styles:
             img, styles = self.synthesis(ws, fts=fts, styles=styles, return_styles=return_styles, **synthesis_kwargs)
         else:
@@ -987,14 +819,7 @@ class Generator(torch.nn.Module):
             return img, styles
         else:
             return img
-    def finetune_para(self):
-#         para_list = [i for i in self.mapping.parameters()]
-        para_list = self.synthesis.finetune_para()
-        return para_list
-    
-    def finetune_train(self,):
-        self.mapping.requires_grad_(True)
-        self.synthesis.finetune_train()
+        
         
 #     def generate_with_w(self, ws):
 #         img = self.synthesis(ws, **self.synthesis_kwargs)
@@ -1125,6 +950,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         mbstd_num_channels  = 1,        # Number of features for the minibatch standard deviation layer, 0 = disable.
         activation          = 'lrelu',  # Activation function: 'relu', 'lrelu', etc.
         conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
+        f_dim  = 512,
                  
     ):
         assert architecture in ['orig', 'skip', 'resnet']
@@ -1142,7 +968,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         self.conv = Conv2dLayer(in_channels + mbstd_num_channels, in_channels, kernel_size=3, activation=activation, conv_clamp=conv_clamp)
         self.fc = FullyConnectedLayer(in_channels * (resolution ** 2), in_channels, activation=activation)
         if use_fts:
-            self.fts = FullyConnectedLayer(in_channels, 512)
+            self.fts = FullyConnectedLayer(in_channels, f_dim)
         self.out = FullyConnectedLayer(in_channels, 1 )#if cmap_dim == 0 else cmap_dim)
 
     def forward(self, x, img, cmap, use_norm=True, fts=None, force_fp32=False):
