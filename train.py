@@ -14,6 +14,9 @@ from torch_utils import custom_ops
 
 from pytorch_lightning import seed_everything
 
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 #----------------------------------------------------------------------------
 
 class UserError(Exception):
@@ -166,7 +169,7 @@ def setup_training_loop_kwargs(
     args.network_snapshot_ticks = snap
 
     if metrics is None:
-        metrics = ['fid50k_full']
+        metrics = ['fid50k_full', 'is50k']
     assert isinstance(metrics, list)
     if not all(metric_main.is_valid_metric(metric) for metric in metrics):
         raise UserError('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
@@ -681,15 +684,14 @@ def main(ctx, outdir, dry_run, **config_kwargs):
         
     # Launch processes.
     print('Launching processes...')
-    with tempfile.TemporaryDirectory() as temp_dir:
-        subprocess_fn(rank=0, cfg=cfg, args=args, temp_dir=temp_dir)
+    if args.num_gpus == 1:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subprocess_fn(rank=0, cfg=cfg, args=args, temp_dir=temp_dir)
     
-    # torch.multiprocessing.set_start_method('spawn')
-    # with tempfile.TemporaryDirectory() as temp_dir:
-    #     if args.num_gpus == 1:
-    #         subprocess_fn(rank=0, cfg=cfg, args=args, temp_dir=temp_dir)
-    #     else:
-    #         torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, cfg, temp_dir), nprocs=args.num_gpus)
+    else:
+        torch.multiprocessing.set_start_method('spawn')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, cfg, temp_dir), nprocs=args.num_gpus)
 
 #----------------------------------------------------------------------------
 

@@ -112,8 +112,8 @@ def training_loop(
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     kimg_per_tick           = 4,        # Progress snapshot interval.
-    image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
-    network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
+    image_snapshot_ticks    = 100,       # How often to save image snapshots? None = disable.
+    network_snapshot_ticks  = 100,       # How often to save network snapshots? None = disable.
     resume_pkl              = None,     # Network pickle to resume training from.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
@@ -277,7 +277,7 @@ def training_loop(
             txt_fts_list = []
             for step in range(len(text)):
                 tokenized_text = clip.tokenize(text[step]).to(device)
-                txt_fts = clip_model.encode_text(tokenized_text).view(1, -1).repeat(labels.shape[0], 1)
+                txt_fts = clip_model.encode_text(tokenized_text).contiguous().view(1, -1).repeat(labels.shape[0], 1)
                 f_txt = txt_fts.to(device)
                 f_txt /= f_txt.norm(dim=-1, keepdim=True)
                 f_txt_ = f_txt.split(batch_gpu)
@@ -536,11 +536,12 @@ def training_loop(
             global_step = int(cur_nimg / 1e3)
             
             # wandb logging
-            stats_dict = {name:value.mean for name, value in stats_dict.items()}
-            wandb.log(stats_dict, step=global_step)
-            
-            stats_metrics = {f'Metrics/{name}':value for name, value in stats_metrics.items()}
-            wandb.log(stats_metrics, step=global_step)
+            if rank == 0:
+                stats_dict_log = {name:value.mean for name, value in stats_dict.items()}
+                wandb.log(stats_dict_log, step=global_step)
+
+                stats_metrics_log = {f'Metrics/{name}':value for name, value in stats_metrics.items()}
+                wandb.log(stats_metrics_log, step=global_step)
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 

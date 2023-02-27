@@ -8,7 +8,7 @@ from . import metric_utils
 # ----------------------------------------------------------------------------
 
 
-def compute_is(opts, num_gen, num_splits, data_cfg, split):
+def compute_is(opts, num_gen, num_splits, dataset):
     # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
     detector_url = "https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt"
     detector_kwargs = dict(

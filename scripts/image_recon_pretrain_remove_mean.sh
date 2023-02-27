@@ -10,7 +10,8 @@ python train.py \
     --mirror=1 \
     --kimg=415 \
     --mixing_prob=1.0 \
-    --normalize_prefix
+    --normalize_prefix \
+    --remove_mean
     
 # mixing_prob==1 -> no text data used \
 # kim 415 is a little over 1 epoch of text-to-img (approx 5 epochs of img recon)

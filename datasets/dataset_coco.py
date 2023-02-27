@@ -5,6 +5,7 @@ import sys
 import json
 import random
 import math
+from pathlib import Path
 from typing import Tuple, Optional, Union
 
 import skimage.io as io
@@ -18,6 +19,8 @@ from .enums import Modality
 from .parse_data import TEXT_TO_IMG_GAP_PATH, TEXT_EMBED_MEAN, IMAGE_EMBED_MEAN
 from .dataset_base import DatasetBase
 from .builder import build_transforms
+
+OLD_ROOT="/pasteur/u/esui/data/coco"
 
 class ClipCocoDataset(DatasetBase):
 
@@ -55,7 +58,9 @@ class ClipCocoDataset(DatasetBase):
         self.captions = all_data["captions"]
         
         ###################
-        with open(f"{data_path[:-4]}_tokens.pkl", 'rb') as f:
+        
+        filepath = os.path.join(OLD_ROOT, f"{Path(data_path).parts[-1][:-4]}_tokens.pkl")
+        with open(filepath, 'rb') as f:
             self.captions_tokens, self.caption_id_2_image_id, all_len = pickle.load(f)
         
         self.max_seq_len = min(int(all_len.mean() + all_len.std() * 10), int(all_len.max()))
@@ -102,7 +107,6 @@ class ClipCocoDataset(DatasetBase):
         
         ## Preprocess image to clip
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # self.preprocess_img = ## TODO!!!
         
         self.preprocess_img = build_transforms(resolution)
         
@@ -145,12 +149,16 @@ class ClipCocoDataset(DatasetBase):
         img_id = self.img_ids[item]
         img_path = self.images[img_id]["img_path"]
         image = io.imread(img_path)
-        image = self.preprocess_img(Image.fromarray(image)).numpy()
-        if image.max() <= 1.:
-            image = (image * 255).astype('uint8')
         
-        if image.shape[0] != 3:
-            image = image.repeat(3, axis=0)
+        if image.shape[0] != 256: # not preprocessed already
+            image = self.preprocess_img(Image.fromarray(image)).numpy()
+            if image.max() <= 1.:
+                image = (image * 255).astype('uint8')
+
+            if image.shape[0] != 3:
+                image = image.repeat(3, axis=0)
+        else:
+            image = np.transpose(image, (2, 0, 1))
         
         return image
 
