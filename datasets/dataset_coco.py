@@ -146,7 +146,11 @@ class ClipCocoDataset(DatasetBase):
             return self.img_ids
     
     def _load_raw_image(self, item):
-        img_id = self.img_ids[item]
+        if self.input_modality == Modality.Language:
+            item = self.cap_ids[item]
+            img_id = self.caption_id_2_image_id[item]
+        else:
+            img_id = self.img_ids[item]
         img_path = self.images[img_id]["img_path"]
         image = io.imread(img_path)
         
@@ -164,6 +168,7 @@ class ClipCocoDataset(DatasetBase):
 
     def get_img_features(self, item):
         if self.input_modality == Modality.Language:
+            item = self.cap_ids[item]
             img_id = self.caption_id_2_image_id[item]
         else:
             img_id = self.img_ids[item]
@@ -187,6 +192,7 @@ class ClipCocoDataset(DatasetBase):
         return img_prefix.squeeze().numpy()
     
     def get_pseudo_txt_features(self, item):
+        # Only used when input modality is vision
         img_id = self.img_ids[item]
         pseudo_txt_prefix = self.images[img_id]["embed"].float()
         
