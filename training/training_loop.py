@@ -522,19 +522,17 @@ def training_loop(
             fields = dict(stats_dict, timestamp=timestamp)
             stats_jsonl.write(json.dumps(fields) + '\n')
             stats_jsonl.flush()
-#         if stats_tfevents is not None:
+        # if stats_tfevents is not None:
 #             global_step = int(cur_nimg / 1e3)
 #             walltime = timestamp - start_time
 #             for name, value in stats_dict.items():
 #                 stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-#                 wandb.log({name:value.mean}, step=global_step)
-                
 #             for name, value in stats_metrics.items():
 #                 stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-#                 wandb.log({f'Metrics/{name}':value}, step=global_step)
             # stats_tfevents.flush()
+        if stats_tfevents is not None:
             global_step = int(cur_nimg / 1e3)
-            
+
             # wandb logging
             if rank == 0:
                 stats_dict_log = {name:value.mean for name, value in stats_dict.items()}
@@ -542,6 +540,8 @@ def training_loop(
 
                 stats_metrics_log = {f'Metrics/{name}':value for name, value in stats_metrics.items()}
                 wandb.log(stats_metrics_log, step=global_step)
+        stats_tfevents.flush()
+        
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
 
